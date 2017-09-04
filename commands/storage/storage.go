@@ -1,3 +1,4 @@
+//Package storage is a file system abstraction for storing Kepler data
 package storage
 
 import (
@@ -51,20 +52,22 @@ type Storage struct {
 
 //Github specific sub structure
 type Github struct {
-	AccessToken string `json:"accesstoken"`
-	Issue       *Issue `json:"issue"`
+	AccessToken  string  `json:"accesstoken"`
+	Issue        []Issue `json:"issue"`
+	CurrentIssue *Issue  `json:"currentissue"`
 }
 
-//Issue ...
+//Issue object structure
 type Issue struct {
 	IssueURL     string        `json:"issueurl"`
 	Owner        string        `json:"owner"`
 	Repo         string        `json:"repo"`
 	Number       int           `json:"number"`
 	PullRequests []PullRequest `json:"pullrequests"`
+	Palette      map[string]string
 }
 
-//PullRequest ...
+//PullRequest object structure
 type PullRequest struct {
 	Repo   string
 	Owner  string
@@ -75,11 +78,12 @@ type PullRequest struct {
 }
 
 //NewStorage object
+//It returns *Storage
 func NewStorage() *Storage {
 
 	s := &Storage{}
 	s.Github = &Github{}
-	s.Github.Issue = &Issue{}
+
 	return s
 }
 
@@ -91,7 +95,7 @@ func path() (string, error) {
 	return p.Join(s, store), nil
 }
 
-//Exists in kepler
+//Exists checks if .kepler file has been set
 func Exists() (bool, error) {
 	pout, err := path()
 	if err != nil {

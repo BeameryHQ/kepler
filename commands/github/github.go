@@ -1,13 +1,19 @@
+//Package github provides a modular way of interacting with github
+//This is primary gateway to create/deleting and reviewing both pull requests and issues
 package github
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AlexsJones/cli/cli"
 	"github.com/AlexsJones/cli/command"
@@ -17,11 +23,16 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var githubClient *github.Client
-var ctx context.Context
-var localStorage *storage.Storage
+//GithubClient is the global github interface
+var GithubClient *github.Client
 
-//AddCommands for this module
+//Ctx is the github oauth context
+var Ctx context.Context
+
+//LocalStorage is a reference to the local storage handle
+var LocalStorage *storage.Storage
+
+//AddCommands for the github module
 func AddCommands(cli *cli.Cli) {
 
 	cli.AddCommand(command.Command{
@@ -42,7 +53,7 @@ func AddCommands(cli *cli.Cli) {
 						Name: "attach",
 						Help: "attach the current issue to a pr <owner> <reponame> <prnumber>",
 						Func: func(args []string) {
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
@@ -57,7 +68,7 @@ func AddCommands(cli *cli.Cli) {
 						Name: "create",
 						Help: "create a pr <owner> <repo> <base> <head> <title>",
 						Func: func(args []string) {
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
@@ -82,7 +93,7 @@ func AddCommands(cli *cli.Cli) {
 			},
 			command.Command{
 				Name: "issue",
-				Help: "Issue command palette",
+				Help: "Issue commands",
 				Func: func(args []string) {
 					fmt.Println("See help for working with issue")
 				},
@@ -95,7 +106,7 @@ func AddCommands(cli *cli.Cli) {
 								fmt.Println("Requires <owner> <repo> <issuename>")
 								return
 							}
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
@@ -114,17 +125,22 @@ func AddCommands(cli *cli.Cli) {
 					},
 					command.Command{
 						Name: "set",
-						Help: "set the current working issue <issue url>",
+						Help: "set the current working issue <issue number>",
 						Func: func(args []string) {
 							if len(args) == 0 || len(args) < 1 {
-								fmt.Println("Requires <issue url>")
+								fmt.Println("Requires <issue number>")
 								return
 							}
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
-							if err := SetIssue(args[0]); err != nil {
+							i, error := strconv.Atoi(args[0])
+							if error != nil {
+								color.Red(error.Error())
+								return
+							}
+							if err := SetIssue(i); err != nil {
 								color.Red(err.Error())
 								return
 							}
@@ -135,22 +151,147 @@ func AddCommands(cli *cli.Cli) {
 						Name: "unset",
 						Help: "unset the current working issue",
 						Func: func(args []string) {
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
-							UnsetIssue()
+							if err := UnsetIssue(); err != nil {
+								color.Red(err.Error())
+								return
+							}
+							color.Green("Okay")
 						},
 					},
 					command.Command{
 						Name: "show",
 						Help: "show the current working issue",
 						Func: func(args []string) {
-							if githubClient == nil || localStorage == nil {
+							if GithubClient == nil || LocalStorage == nil {
 								fmt.Println("Please login first...")
 								return
 							}
-							ShowIssue()
+							if err := ShowIssue(); err != nil {
+								color.Red(err.Error())
+								return
+							}
+							color.Green("Okay")
+						},
+					},
+					command.Command{
+						Name: "palette",
+						Help: "Manipulate the issue palette of working repos",
+						Func: func(args []string) {
+							fmt.Println("Please run palette commands from your meta repo working directory")
+						},
+						SubCommands: []command.Command{
+							command.Command{
+								Name: "add",
+								Help: "Add a repository to the palette as part of current working issue by name <name>",
+								Func: func(args []string) {
+									if len(args) == 0 || len(args) < 1 {
+										fmt.Println("Requires <issue number>")
+										return
+									}
+									if GithubClient == nil || LocalStorage == nil {
+										fmt.Println("Please login first...")
+										return
+									}
+									if LocalStorage.Github.CurrentIssue == nil {
+										fmt.Println("There is no working issue set; set with github issue set")
+										return
+									}
+									if _, err := os.Stat(args[0]); os.IsNotExist(err) {
+										color.Red(fmt.Sprintf("The named repo %s does not exist as a sub directory of the current working directory", args[0]))
+										return
+									}
+									dir, err := os.Getwd()
+									if err != nil {
+										log.Fatal(err)
+									}
+									p := path.Join(dir, args[0])
+									LocalStorage.Github.CurrentIssue.Palette[args[0]] = p
+									storage.Save(LocalStorage)
+									color.Green("Okay")
+								},
+							},
+							command.Command{
+								Name: "remove",
+								Help: "Remove a repository from the palette as part of the current working issue by name <name>",
+								Func: func(args []string) {
+									if len(args) == 0 || len(args) < 1 {
+										fmt.Println("Requires <issue number>")
+										return
+									}
+									if GithubClient == nil || LocalStorage == nil {
+										fmt.Println("Please login first...")
+										return
+									}
+									if LocalStorage.Github.CurrentIssue == nil {
+										fmt.Println("There is no working issue set; set with github issue set")
+										return
+									}
+									found := false
+									for k := range LocalStorage.Github.CurrentIssue.Palette {
+										if strings.Compare(k, args[0]) == 0 {
+											found = true
+											delete(LocalStorage.Github.CurrentIssue.Palette, k)
+											storage.Save(LocalStorage)
+										}
+									}
+									if found != true {
+										color.Red(fmt.Sprintf("There was no repo matching the name %s in the palette", args[0]))
+										return
+									}
+									color.Green("Okay")
+								},
+							},
+							command.Command{
+								Name: "show",
+								Help: "Show repositories in the palette as part of the current working issue",
+								Func: func(args []string) {
+
+									if GithubClient == nil || LocalStorage == nil {
+										fmt.Println("Please login first...")
+										return
+									}
+									if LocalStorage.Github.CurrentIssue == nil {
+										fmt.Println("There is no working issue set; set with github issue set")
+										return
+									}
+									for k, v := range LocalStorage.Github.CurrentIssue.Palette {
+										cmd := exec.Command("git", "branch")
+										cmd.Dir = v
+										out, err := cmd.Output()
+										if err != nil {
+											color.Red(err.Error())
+											return
+										}
+										ar := strings.Split(string(out), " ")
+										trimmed := strings.TrimSuffix(string(ar[1]), "\n")
+										trimmed = strings.TrimPrefix(trimmed, "*")
+										trimmed = strings.TrimSpace(trimmed)
+										fmt.Println(fmt.Sprintf("Name: %s Branch: %s Path: %s", k, trimmed, v))
+									}
+									color.Green("Okay")
+								},
+							},
+							command.Command{
+								Name: "delete",
+								Help: "Delete all repositories in the palette as part of the current working issue",
+								Func: func(args []string) {
+
+									if GithubClient == nil || LocalStorage == nil {
+										fmt.Println("Please login first...")
+										return
+									}
+									if LocalStorage.Github.CurrentIssue == nil {
+										fmt.Println("There is no working issue set; set with github issue set")
+										return
+									}
+									LocalStorage.Github.CurrentIssue.Palette = make(map[string]string)
+									color.Green("Okay")
+								},
+							},
 						},
 					},
 				},
@@ -165,7 +306,7 @@ func AddCommands(cli *cli.Cli) {
 					}
 					if b {
 						//Load and save
-						localStorage, err = storage.Load()
+						LocalStorage, err = storage.Load()
 						if err != nil {
 							color.Red(err.Error())
 							return
@@ -175,18 +316,18 @@ func AddCommands(cli *cli.Cli) {
 						reader := bufio.NewReader(os.Stdin)
 						token, _ := reader.ReadString('\n')
 						log.Println("Creating new storage object...")
-						localStorage = storage.NewStorage()
-						localStorage.Github.AccessToken = strings.TrimSpace(token)
-						storage.Save(localStorage)
+						LocalStorage = storage.NewStorage()
+						LocalStorage.Github.AccessToken = strings.TrimSpace(token)
+						storage.Save(LocalStorage)
 					}
 
-					ctx = context.Background()
+					Ctx = context.Background()
 					ts := oauth2.StaticTokenSource(
-						&oauth2.Token{AccessToken: localStorage.Github.AccessToken},
+						&oauth2.Token{AccessToken: LocalStorage.Github.AccessToken},
 					)
-					tc := oauth2.NewClient(ctx, ts)
-					githubClient = github.NewClient(tc)
-					_, _, err = githubClient.Repositories.List(ctx, "", nil)
+					tc := oauth2.NewClient(Ctx, ts)
+					GithubClient = github.NewClient(tc)
+					_, _, err = GithubClient.Repositories.List(Ctx, "", nil)
 					if err != nil {
 						color.Red("Could not authenticate; please purge and login again")
 						color.Red(err.Error())
@@ -195,15 +336,31 @@ func AddCommands(cli *cli.Cli) {
 					color.Green("Authentication Successful.")
 				},
 			},
+			command.Command{
+				Name: "fetch",
+				Help: "fetch remote repos",
+				Func: func(args []string) {
+					if GithubClient == nil || LocalStorage == nil {
+						fmt.Println("Please login first...")
+						return
+					}
+					if err := FetchRepos(); err != nil {
+						color.Red(err.Error())
+						return
+					}
+					color.Green("Okay")
+				},
+			},
 		},
 	})
 }
 
-//CreateIssue ...
+//CreateIssue creates an issue based on the selected repository
+//This will return on success an issue object that is stored in Kepler
 func CreateIssue(owner string, repo string, title string) error {
 	var err error
-	if localStorage == nil {
-		localStorage, err = storage.Load()
+	if LocalStorage == nil {
+		LocalStorage, err = storage.Load()
 		if err != nil {
 			return err
 		}
@@ -211,49 +368,63 @@ func CreateIssue(owner string, repo string, title string) error {
 	fmt.Printf("Owner: %s\n", owner)
 	fmt.Printf("Repo: %s\n", repo)
 	fmt.Printf("Title: %s\n", title)
-	githubClient.Issues.List(ctx, true, &github.IssueListOptions{})
+	GithubClient.Issues.List(Ctx, true, &github.IssueListOptions{})
 
 	request := &github.IssueRequest{
 		Title: &title,
 	}
-	issue, resp, err := githubClient.Issues.Create(ctx, owner, repo, request)
+	issue, resp, err := GithubClient.Issues.Create(Ctx, owner, repo, request)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Github says %d\n", resp.StatusCode)
 	fmt.Printf("%s\n", issue.GetHTMLURL())
 	fmt.Printf("Issue status is %s\n", issue.GetState())
-	localStorage.Github.Issue.IssueURL = issue.GetHTMLURL()
-	localStorage.Github.Issue.Owner = owner
-	localStorage.Github.Issue.Repo = repo
-	localStorage.Github.Issue.Number = issue.GetNumber()
-	storage.Save(localStorage)
+
+	var stIssue storage.Issue
+	stIssue.IssueURL = issue.GetHTMLURL()
+	stIssue.Owner = owner
+	stIssue.Repo = repo
+	stIssue.Number = issue.GetNumber()
+	stIssue.Palette = make(map[string]string)
+
+	LocalStorage.Github.Issue = append(LocalStorage.Github.Issue, stIssue)
+	storage.Save(LocalStorage)
 	return nil
 }
 
-//ShowIssue displays current working issue
+//ShowIssue shows stored issues and highlights the current working issue if set
 func ShowIssue() error {
 	var err error
-	if localStorage == nil {
-		localStorage, err = storage.Load()
+	if LocalStorage == nil {
+		LocalStorage, err = storage.Load()
 		if err != nil {
 			return err
 		}
 	}
-	if localStorage.Github.Issue.IssueURL != "" {
-		issue, _, err := githubClient.Issues.Get(ctx, localStorage.Github.Issue.Owner, localStorage.Github.Issue.Repo, localStorage.Github.Issue.Number)
+	if len(LocalStorage.Github.Issue) == 0 {
+		return errors.New("No issue set")
+	}
+	for count, currentIssue := range LocalStorage.Github.Issue {
+
+		issue, _, err := GithubClient.Issues.Get(Ctx, currentIssue.Owner, currentIssue.Repo, currentIssue.Number)
 
 		if err != nil {
 			color.Red(err.Error())
 			return err
 		}
-		fmt.Printf("Working issue at %s with status %s\n", localStorage.Github.Issue.IssueURL, issue.GetState())
+		if LocalStorage.Github.CurrentIssue != nil {
+			if LocalStorage.Github.CurrentIssue.IssueURL == currentIssue.IssueURL {
+				fmt.Printf("Current issue >>>> ")
+			}
+		}
+		fmt.Printf("%d: issue at %s with status %s\n", count, currentIssue.IssueURL, issue.GetState())
 
-		if len(localStorage.Github.Issue.PullRequests) > 0 {
+		if len(currentIssue.PullRequests) > 0 {
 			fmt.Printf("\n")
-			for _, pr := range localStorage.Github.Issue.PullRequests {
+			for _, pr := range currentIssue.PullRequests {
 
-				p, _, err := githubClient.PullRequests.Get(ctx, pr.Owner, pr.Repo, pr.Number)
+				p, _, err := GithubClient.PullRequests.Get(Ctx, pr.Owner, pr.Repo, pr.Number)
 				if err != nil {
 					color.Red(err.Error())
 					return err
@@ -262,41 +433,51 @@ func ShowIssue() error {
 
 			}
 		}
-
-	} else {
-		color.Red("No working issue set")
 	}
 	return nil
 }
 
-//UnsetIssue from storage
+//UnsetIssue the working issue from storage if set
 func UnsetIssue() error {
 	var err error
-	if localStorage == nil {
-		localStorage, err = storage.Load()
+	if LocalStorage == nil {
+		LocalStorage, err = storage.Load()
 		if err != nil {
 			return err
 		}
 
 	}
-	localStorage.Github.Issue = &storage.Issue{PullRequests: []storage.PullRequest{}}
-	return storage.Save(localStorage)
+	if LocalStorage.Github.CurrentIssue == nil {
+		return errors.New("No issue to unset")
+	}
+	LocalStorage.Github.CurrentIssue = nil
+	return storage.Save(LocalStorage)
 }
 
-//SetIssue in storage
-func SetIssue(issueurl string) error {
+//SetIssue in storage using the issue index number
+func SetIssue(issueNumber int) error {
 	var err error
-	if localStorage == nil {
-		localStorage, err = storage.Load()
+	if LocalStorage == nil {
+		LocalStorage, err = storage.Load()
 		if err != nil {
 			return err
 		}
 	}
-	localStorage.Github.Issue.IssueURL = issueurl
-	return storage.Save(localStorage)
+
+	if issueNumber > len(LocalStorage.Github.Issue) {
+		return errors.New("Out of bounds")
+	}
+
+	is := LocalStorage.Github.Issue[issueNumber]
+	if &is == nil {
+		return errors.New("No issue pointer")
+	}
+	LocalStorage.Github.CurrentIssue = &is
+	return storage.Save(LocalStorage)
 }
 
-//CreatePR makes a new pull request
+//CreatePR makes a new pull request with the given criteria
+//It returns an error object with nil on success
 func CreatePR(owner string, repo string, base string, head string, title string) error {
 
 	fmt.Printf("Owner: %s\n", owner)
@@ -305,13 +486,13 @@ func CreatePR(owner string, repo string, base string, head string, title string)
 	fmt.Printf("Base: %s\n", base)
 	fmt.Printf("Head: %s\n", head)
 	var prbody string
-	if localStorage.Github.Issue.IssueURL != "" {
-		fmt.Println("Attach to the current working issue? [Y/N]")
+	if LocalStorage.Github.CurrentIssue.IssueURL != "" {
+		fmt.Printf("Attach to the current working issue? (Issue: %s) [Y/N]\n", LocalStorage.Github.CurrentIssue.IssueURL)
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
 		if strings.Contains(response, "Y") {
-			prbody = localStorage.Github.Issue.IssueURL
-			fmt.Printf("Body: %s\n", localStorage.Github.Issue.IssueURL)
+			prbody = LocalStorage.Github.CurrentIssue.IssueURL
+			fmt.Printf("Body: %s\n", LocalStorage.Github.CurrentIssue.IssueURL)
 		}
 	}
 	pull := github.NewPullRequest{
@@ -320,7 +501,7 @@ func CreatePR(owner string, repo string, base string, head string, title string)
 		Title: &title,
 		Body:  &prbody,
 	}
-	p, resp, err := githubClient.PullRequests.Create(ctx, owner, repo, &pull)
+	p, resp, err := GithubClient.PullRequests.Create(Ctx, owner, repo, &pull)
 	if err != nil {
 		color.Red(err.Error())
 		return err
@@ -336,22 +517,22 @@ func CreatePR(owner string, repo string, base string, head string, title string)
 		Title:  title,
 		Number: p.GetNumber(),
 	}
-	localStorage.Github.Issue.PullRequests = append(localStorage.Github.Issue.PullRequests, storedPr)
-	storage.Save(localStorage)
+	LocalStorage.Github.CurrentIssue.PullRequests = append(LocalStorage.Github.CurrentIssue.PullRequests, storedPr)
+	storage.Save(LocalStorage)
 	return nil
 }
 
-//AttachIssuetoPr ...
+//AttachIssuetoPr will use the current working issue to attach a new pull request too
 func AttachIssuetoPr(owner string, reponame string, number string) error {
 
-	if localStorage == nil {
-		localStorage, _ = storage.Load()
+	if LocalStorage == nil {
+		LocalStorage, _ = storage.Load()
 	}
 	fmt.Printf("Owner: %s\n", owner)
 	fmt.Printf("Repo: %s\n", reponame)
 	fmt.Printf("Title: %s\n", number)
 
-	if localStorage.Github.Issue.IssueURL == "" {
+	if LocalStorage.Github.CurrentIssue.IssueURL == "" {
 		color.Red("No working issue set...")
 		return nil
 	}
@@ -362,20 +543,67 @@ func AttachIssuetoPr(owner string, reponame string, number string) error {
 		return err
 	}
 
-	pr, res, err := githubClient.PullRequests.Get(ctx, owner, reponame, num)
+	pr, res, err := GithubClient.PullRequests.Get(Ctx, owner, reponame, num)
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
 	fmt.Printf("Github says %d\n", res.StatusCode)
 
-	appended := fmt.Sprintf("%s\n%s\n", string(pr.GetBody()), localStorage.Github.Issue.IssueURL)
+	appended := fmt.Sprintf("%s\n%s\n", string(pr.GetBody()), LocalStorage.Github.CurrentIssue.IssueURL)
 
-	pr, res, err = githubClient.PullRequests.Edit(ctx, owner, reponame, num, &github.PullRequest{Body: &appended})
+	pr, res, err = GithubClient.PullRequests.Edit(Ctx, owner, reponame, num, &github.PullRequest{Body: &appended})
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
 	color.Green("Okay")
+	return nil
+}
+
+//FetchRepos into the current working directory
+func FetchRepos() error {
+
+	var count = 0
+	var repoList = make(map[string]string)
+
+	opts := github.RepositoryListOptions{}
+
+	opts.PerPage = 20
+	for {
+		opts.Page = count
+		repos, resp, err := GithubClient.Repositories.List(Ctx, "", &opts)
+		if err != nil {
+			return err
+		}
+		if len(repos) == 0 || err != nil || resp.StatusCode != 200 {
+			break
+		}
+		log.Printf("Fetched page %d from github\n", count)
+		count++
+
+		for _, repo := range repos {
+			repoList[repo.GetName()] = repo.GetSSHURL()
+		}
+	}
+
+	for k, v := range repoList {
+		fmt.Printf("%s -> %s\n", k, v)
+	}
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Fetch from remotes?(Y/N): ")
+	text, _ := reader.ReadString('\n')
+	if strings.Contains(text, "Y") {
+
+		for name, repo := range repoList {
+			fmt.Printf("Fetching %s\n", name)
+			out, err := exec.Command("git", "clone", fmt.Sprintf("%s", repo)).Output()
+			if err != nil {
+				color.Red(fmt.Sprintf("%s %s", string(out), err.Error()))
+			}
+			color.Green(fmt.Sprintf("Fetched %s\n", name))
+			time.Sleep(time.Second)
+		}
+	}
 	return nil
 }
